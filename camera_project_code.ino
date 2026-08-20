@@ -7,7 +7,7 @@ state curState = IDLE; // Initializing the current state
 unsigned long lastMotionTime = 0; // Time since the last motion recorded by the camera
 const unsigned long holdTime = 5000; // Time before the camera switches from ACTIVE to DECAY
 
-sensor_t* s; // Pointer that gets assigned to the settings of the ESP-32 Camera after confirming that its initalization succeeded
+sensor_t* s; // Pointer that gets assigned to the settings of the ESP32 Camera after confirming that its initalization succeeded
 bool hasPSRAM = false;
 const int STRIDE = 16; // The increment in the indexes when looping over the 1D array of the image returned by the camera
 const int NOISE = 28; // !!! TODO: Measure the actual base-level noise from the PIR sensor and camera !!!
@@ -41,10 +41,10 @@ void setFramesize(framesize_t size) {
 void setup() {
   Serial.begin(115200);
 
-  pinMode(PIR_PIN, INPUT); // GPIO 13 on the PIR Sensor
+  pinMode(PIR_PIN, INPUT); // GPIO 14 on the ESP32 camera
 
   camera_config_t config;
-  config.pin_pwdn = 32; // Configuring the pins on the ESP-32 camera
+  config.pin_pwdn = 32; // Configuring the pins on the ESP32 camera
   config.pin_reset = -1;
   config.pin_xclk = 0;
   config.pin_sscb_sda = 26;
@@ -61,7 +61,7 @@ void setup() {
   config.pin_href = 23;
   config.pin_pclk = 22;
 
-  config.ledc_channel = LEDC_CHANNEL_0; // Configuring settings for the ESP-32 camera
+  config.ledc_channel = LEDC_CHANNEL_0; // Configuring settings for the ESP32 camera
   config.ledc_timer = LEDC_TIMER_0;
   config.xclk_freq_hz = 8000000;
   config.pixel_format = PIXFORMAT_GRAYSCALE;
@@ -173,21 +173,21 @@ void loop() {
 
       if (millis() - decayStartTime <= DECAY_PERIOD) { // Same logic for image processing as in the ACTIVE state, but the time between captures has been set to DECAY_PERIOD
         if (millis() - lastCaptureTime >= DECAY_CAPTURE_RATE) {
-        camera_fb_t* fb = esp_camera_fb_get(); // Declaring a pointer to the memory block assigned to the most recent picture captured by the camera
-        if (fb != NULL) {
-          lastCaptureTime = millis();
-          uint8_t* imageArr = fb->buf;
-          size_t imageArrLen = fb->len;
-          for (size_t n = 0; n < imageArrLen; n += STRIDE) {
-            prevPixels[n/STRIDE] = imageArr[n];
+          camera_fb_t* fb = esp_camera_fb_get(); // Declaring a pointer to the memory block assigned to the most recent picture captured by the camera
+          if (fb != NULL) {
+            lastCaptureTime = millis();
+            uint8_t* imageArr = fb->buf;
+            size_t imageArrLen = fb->len;
+            for (size_t n = 0; n < imageArrLen; n += STRIDE) {
+              prevPixels[n/STRIDE] = imageArr[n];
+            }
+            isFirstFrame = false;
+            esp_camera_fb_return(fb); // Freeing up the memory block so that it can be reused by the driver
           }
-          isFirstFrame = false;
-          esp_camera_fb_return(fb); // Freeing up the memory block so that it can be reused by the driver
+          else {
+            Serial.println("Error occurred in fetching image.");
+          }
         }
-        else {
-          Serial.println("Error occurred in fetching image.");
-        }
-      }
       }
       else {
         curState = IDLE;

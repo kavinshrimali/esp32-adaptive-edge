@@ -1,35 +1,102 @@
 # esp32-adaptive-edge
-An energy-efficient ESP-32 IoT edge vision node that dynamically adjusts its frame rate and sleep states based on PIR-interrupts and real-time pixel delta tracking.
 
-General Description:
-In large IoT networks, excess power is consumed by components that aren't in active use. This is a particularly important issue to consider when dealing with edge systems that locally process information, for which efficient power management is crucial. Standard motion-powered systems are typically binary (ON or OFF), and lack numerous states to account for varying motion complexity. In this system, a PIR sensor acts as an external interrupt; the ESP32 remains in low-power mode (i.e. light sleep) until motion is detected. Once motion is detected, the ESP32 camera is 'woken up' and carries out pixel delta tracking by continuously processing images received from the camera. The program dynamically adjusts the camera's frame rate based on the motion's complexity (ranging from 0 ms to 300 ms), decaying back to light sleep when there's a pause of 5000 ms between consecutive image captures. 
+An energy-efficient ESP32 IoT edge vision node that dynamically adjusts its frame rate and sleep states based on PIR-interrupts and real-time pixel delta tracking.
 
-State transitions:
-IDLE: Light sleep mode, low power consumption. System awaits a PIR interrupt.
-IDLE -> ACTIVE: State switches from IDLE to ACTIVE when motion is detected.
-ACTIVE: Images captured by the camera are processed as a 1D array. Frame rate dynamically adjusted based on determined complexity.
-ACTIVE -> DECAY: State switches from ACTIVE to DECAY when a gap of 5000 ms occurs between consecutive movements.
-DECAY: The ESP32 camera remains awake. If motion is detected, the state switches back to DECAY. Otherwise, after 3000 ms the state changes to IDLE.
-DECAY -> IDLE: The ESP32 camera returns to its light sleep mode.
+## Overview
 
-Breakdown of the algorithm:
-Hardware interrupts occur when the PIR sensor detects motion. Images captured by the ESP32 are processed as 1D arrays of bytes. If the current image being processed is the first frame, the bytes are stored in an array and no delta calculation takes place. The second frame's bytes are subtracted from the bytes from the first image (stored in the aforementioned array), and are then stored in the array. This process is repeated from the second frame onwards. If the total delta is greater than the HIGH_MOTION_THRESHOLD, the delay between image captures is set to 0 ms. If the total difference is less than this threshold, but greater than the LOW_MOTION_THRESHOLD, the delay between image captures is set to 150 ms. Otherwise, the delay is set to 300 ms. The HIGH_MOTION_THRESHOLD and LOW_MOTION_THRESHOLD were determined by aiming the ESP32 at a static frame and calculating the total 'noise' for various levels of movement (i.e. the total delta between the pixels in an array representing an image). The value determined when 0 motion occurred was deemed the LOW_MOTION_THRESHOLD; similarly, the value calculated when complex movement took place was deemed the HIGH_MOTION_THRESHOLD.
+In edge IoT networks, excess power is consumed by components that aren't in active use. Standard motion-powered systems are typically binary (all-on or all-off), and lack numerous states to account for varying motion complexity. 
 
-Key design decisions:
-The 2 main options for the ESP32's framesize are: VGA (640 x 480) and QQVGA (160 x 120). Rapidly changing the framesize runs the risk of corrupting images. This is because, during the camera's configuration we define a framesize for the camera. Accordingly, the ESP32's internal DMA (Digital Memory Access, which is responsible for transferring bits captured by the camera to the board's peripherals without involvement of the CPU to prevent CPU bottlenecks) creates a linked list that allows for data transfer appropriate for the specified framesize, creating issues when the framesize is dynamically changed. 
+This project implements the following power-management architecture:
+1. A PIR sensor acts as an external interrupt, keeping the ESP32 in low-power light sleep until motion is detected.
+2. Once awake, the camera processes downsampled grayscale images to calculate real-time pixel deltas. The program dynamically adjusts the camera's frame rate based on the motion's complexity (ranging from 0 ms to 300 ms), and decays back to light sleep when there's a pause of 5000 ms between consecutive image captures. 
 
-I decided to use PSRAM (Pseudo-Static RAM) rather than DRAM (Data RAM) for this project to allow for continuous motion capture. PSRAM-enabled ESP32 modules are capable of storing 2 images at a time; hence, while calculating the pixel delta for the first image, the ESP32 camera takes another picture, allowing for smoother processing. Conversely, the DRAM only allows for the storage of one photo at a time, resulting in slower processing and potential delays in state transitions.  
+## State transitions
 
-A VGA image has 640 x 480 = 307,200 pixels. Processing each pixel in the image would be slow; to reduce the time taken to carry out the pixel delta calculation, I decided to establish a 'stride'. The 'stride' serves as the increment in the loop that iterates over each pixel in the array, and reduces the time complexity of the pixel delta calculation by a factor of 1/stride. I used a stride of 16 to concurrently achieve faster processing while ensuring that a representative sample of pixels is used in the delta calculation.
+IDLE: Light sleep mode awaiting a PIR interrupt on `GPIO 14`.
+IDLE -> ACTIVE: Triggered immediately when motion is detected.
+ACTIVE: Frames are captured and processed as a 1D array. Frame rate dynamically adjusted based on calculated pixel deltas.
+ACTIVE -> DECAY: Occurs after a 5000 ms gap with no detected motion.
+DECAY: Intermittent frame capture (every 500 ms). If motion is detected, the state switches back to ACTIVE. If no motion occurs for more than 3000 ms, state changes to IDLE.
+DECAY -> IDLE: System re-enters light sleep mode.
 
-Component List:
-AM312 PIR Motion Sensor
-AI Thinker ESP32 Camera
-ESP32 MB Camera Shield
-Breadboard
-Micro-USB to USB Connector
-100 μF Capacitor
-Jumper Cables
+## Algorithm Breakdown:
 
-Pinout:
+1. **Interrupt and Wakeup:** The PIR Sensor drives `GPIO 14` HIGH, waking the ESP32 core via `esp_light_sleep_start()` and `gpio_wakeup_enable()`.
+2. **Frame Capture:** Grayscale frames (640 x 480) are processed as 1D arrays.
+3. **Subsampling:** To avoid looping over all 307,200 bytes, the algorithm samples every 16th byte (`STRIDE` = 16) for a total of 19,200 bytes to reduce processing times.
+4. **Pixel Delta Calculation:**
+   * The first frame populates the array `prevPixels[]` as an initial baseline.
+   * From the second frame onwards, the algorithm calculates the difference between grayscale pixel values and their corresponding pixels in the `prevPixels[]` array. The difference is evaluated against a `NOISE` value; if the difference exceeds the `NOISE` value, `totalDelta` increments by 1.
+5. **Adaptive Frame Rate Adjustment:**
+   * If `totalDelta` >= `HIGH_MOTION_THRESHOLD`: `frameDelay` = 0 ms (Maximum frame rate)
+   * If `totalDelta` >= `LOW_MOTION_THRESHOLD`: `frameDelay` = 150 ms
+   * If `totalDelta` < `LOW_MOTION_THRESHOLD`: `frameDelay` = 300 ms (Minimum frame rate)
 
+## Key design decisions
+* **Fixed Frame Size (VGA):** Flipping between VGA (640 x 480) and QQVGA (160 x 120) framesizes creates register lockups and desynchronizes DMA (Direct Memory Access) descriptor chains.
+* **Enabling PSRAM:** Using PSRAM (Pseudo-Static RAM) over DRAM (Data RAM) allows for continuous image processing. This is because enabling PSRAM allows for the `fb_count` to be set to 2 rather than 1 (as in the case of DRAM). As a result, while the algorithm runs the pixel delta tracking on the first image, it captures and stores the next frame, allowing for smoother processing.
+* **Power Supply Buffering (100 µF Capacitor):** The PIR sensor is extremely sensitive to voltage changes in the power rail. The capacitor prevents false PIR interrupts by smoothing out voltage changes caused by changing power consumption. The capacitor also smooths out current changes that can cause the camera to brownout and reboot.
+
+## Hardware Setup and Wiring
+
+### _Bill of Materials_
+* AI-Thinker ESP32-CAM
+* AM312 Mini PIR Motion Sensor
+* ESP32-CAM-MB (FTDI Programmer Shield)
+* 100 μF Electrolytic Capacitor
+* Half-Size Breadboard and Jumper Cables
+
+### _Pinout Mapping_
+* **PIR Sensor (AM312):**
+  * `VCC` -> Positive (`+`) power rail
+  * `GND` -> Negative (`-`) power rail
+  * `VOUT` -> `GPIO14`
+
+* **FTDI Programmer / ESP32-CAM-MB:**
+  * `5V` -> Positive (+) power rail
+  * `GND` -> Negative (-) power rail
+  * `TX` -> `U0R` (`GPIO 3`) of ESP32-CAM
+  * `RX` -> `U0T` (`GPIO 1`) of ESP-32 CAM
+
+* **ESP32-CAM**
+  * `5V` -> Positive (+) power rail
+  * `GND` -> Negative (-) power rail
+  * `U0R` (`GPIO 3`) -> `U0T` of ESP32-CAM-MB
+  * `U0T` (`GPIO 1`) -> `U0R` of ESP32-CAM-MB
+  * `GPIO 14` -> PIR Sensor `VOUT`
+  * `IO0` -> Negative (-) power rail (Jumper in place during boot to flash; remove for normal run)
+
+* **Decoupling Capacitor**
+  * Long lead (+) -> Positive (+) power rail
+  * Short lead (-) -> Negative (-) power rail
+
+## Empirical Data and Impact
+### _Current draw for all states_
+  **IDLE:** ~30 mA | Light Sleep, awaiting PIR interrupt
+  **ACTIVE:** ~ 100 mA | Frame Capture and Pixel Delta Tracking
+  **DECAY:** ~ 30 mA | Awaiting motion before returning to light sleep
+
+**Power Reduction:** Multi-state throttling yields a **70% reduction in current draw** during IDLE periods, as compared to ACTIVE periods.
+
+## Build and Flash Configuration
+
+* **Board:** AI Thinker ESP32-CAM
+* **Flash Frequency:** 40 MHz
+* **Flash Mode:** DIO
+* **Partition Scheme:** HUGE APP (3MB No OTA/1MB SPIFFS)
+* **PSRAM:** Enabled
+* **Baud Rate:** 115200
+
+## Flash Walkthrough
+1. Ensure IO0 on the ESP32-CAM is connected to the Negative (`-`) power rail. This puts the board in flashing mode.
+2. Connect the FTDI Programmer to your computer.
+3. In the Arduino IDE, apply the settings above and select the correct Port.
+4. Power cycle the ESP32-CAM by disconnecting and re-connecting its 5V jumper.
+5. Upload the code (either `sensor_test_code.ino` or `camera_project_code.ino`). 
+6. After the upload finishes, disconnect IO0 from the Negative (`-`) power rail
+7. Power cycle the ESP32-CAM once more (disconnect and re-connect the 5V jumper) to boot into normal run mode.
+
+## Repository Structure
+
+* `sensor_test_code.ino`: Calibration sketch used to establish baseline sensor noise (`NOISE`), `LOW_MOTION_THRESHOLD`, and `HIGH_MOTION_THRESHOLD` on a static scene.
+* `camera_project_code.ino`: Firmware containing three-state machine, PIR interrupt handler, and adaptive frame rate processing.
